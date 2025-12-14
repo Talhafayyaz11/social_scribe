@@ -217,10 +217,10 @@ defmodule SocialScribeWeb.MeetingLive.HubSpotUpdateComponent do
                           suggestion["property"],
                           suggestion["old_value"],
                           @property_metadata
-                        ) || "Empty"}
+                        ) || "No existing value"}
                       </div>
                     </div>
-                    <.icon name="hero-arrow-long-right" class="h-5 w-5 text-gray-400" />
+                    <.icon name="hero-arrow-long-right" class="h-5 w-5 text-gray-400 self-center" />
                     <div class="flex-1">
                       <div class="text-xs text-gray-500 mb-1">New Value</div>
                       <div class="text-sm bg-white border border-indigo-300 ring-1 ring-indigo-300 rounded px-2 py-1 text-gray-900 font-medium">
