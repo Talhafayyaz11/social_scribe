@@ -4,14 +4,47 @@ defmodule SocialScribeWeb.AuthController do
   alias SocialScribe.FacebookApi
   alias SocialScribe.Accounts
   alias SocialScribeWeb.UserAuth
+  plug :log_hubspot_redirect when action in [:request]
   plug Ueberauth
 
   require Logger
+
+  # Plug to log HubSpot OAuth redirect URL
+  defp log_hubspot_redirect(%{params: %{"provider" => "hubspot"}} = conn, _opts) do
+    Plug.Conn.register_before_send(conn, fn conn ->
+      if conn.status in [301, 302, 303, 307, 308] do
+        redirect_url = Plug.Conn.get_resp_header(conn, "location") |> List.first()
+        Logger.info("=== HubSpot OAuth Redirect URL ===")
+        Logger.info("URL: #{redirect_url}")
+        Logger.info("===================================")
+      end
+      conn
+    end)
+  end
+
+  defp log_hubspot_redirect(conn, _opts), do: conn
 
   @doc """
   Handles the initial request to the provider (e.g., Google).
   Ueberauth's plug will redirect the user to the provider's consent page.
   """
+  def request(conn, %{"provider" => "hubspot"} = params) do
+    Logger.info("=== HubSpot OAuth Request ===")
+    Logger.info("Provider: hubspot")
+    Logger.info("Params: #{inspect(params)}")
+
+    # Get the HubSpot OAuth config
+    hubspot_config = Application.get_env(:ueberauth, Ueberauth.Strategy.Hubspot.OAuth, [])
+    Logger.info("HubSpot OAuth Config: #{inspect(hubspot_config)}")
+
+    # Get the Ueberauth provider config
+    ueberauth_config = Application.get_env(:ueberauth, Ueberauth, [])
+    hubspot_provider = Keyword.get(ueberauth_config, :providers, [])[:hubspot]
+    Logger.info("HubSpot Provider Config: #{inspect(hubspot_provider)}")
+
+    render(conn, :request)
+  end
+
   def request(conn, _params) do
     render(conn, :request)
   end
@@ -24,7 +57,10 @@ defmodule SocialScribeWeb.AuthController do
       })
       when not is_nil(user) do
     Logger.info("Google OAuth")
-    Logger.info(auth)
+    Logger.info("Auth UID: #{auth.uid}")
+    Logger.info("Auth Email: #{auth.info.email}")
+    Logger.info("Credentials: #{inspect(auth.credentials)}")
+    Logger.info("Refresh Token Present: #{!is_nil(auth.credentials.refresh_token)}")
 
     case Accounts.find_or_create_user_credential(user, auth) do
       {:ok, _credential} ->
@@ -93,6 +129,36 @@ defmodule SocialScribeWeb.AuthController do
       {:error, _reason} ->
         conn
         |> put_flash(:error, "Could not add Facebook account.")
+        |> redirect(to: ~p"/dashboard/settings")
+    end
+  end
+
+  def callback(%{assigns: %{ueberauth_auth: auth, current_user: user}} = conn, %{
+        "provider" => "hubspot"
+      })
+      when not is_nil(user) do
+    Logger.info("HubSpot OAuth")
+    Logger.info(auth)
+
+    # The ueberauth_hubspot strategy doesn't populate auth.uid
+    # We need to extract it from the access_token_info (stored in conn.private)
+    # Use hub_id as the unique identifier for the HubSpot account
+    hub_id =
+      conn.private[:access_token_info]["hub_id"] ||
+      conn.private[:access_token_info]["user_id"]
+
+    # Update the auth struct with the extracted UID
+    auth_with_uid = %{auth | uid: to_string(hub_id)}
+
+    case Accounts.find_or_create_user_credential(user, auth_with_uid) do
+      {:ok, _credential} ->
+        conn
+        |> put_flash(:info, "HubSpot account added successfully.")
+        |> redirect(to: ~p"/dashboard/settings")
+
+      {:error, _reason} ->
+        conn
+        |> put_flash(:error, "Could not add HubSpot account.")
         |> redirect(to: ~p"/dashboard/settings")
     end
   end

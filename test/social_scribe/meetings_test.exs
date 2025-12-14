@@ -264,6 +264,7 @@ defmodule SocialScribe.MeetingsTest do
     import SocialScribe.MeetingTranscriptExample
 
     test "creates a complete meeting record with transcript and participants" do
+      # Mock the transcript data as a list (legacy/direct content) which bypasses download
       calendar_event = calendar_event_fixture(%{summary: "Test Meeting"})
 
       recall_bot =
@@ -289,17 +290,51 @@ defmodule SocialScribe.MeetingsTest do
       assert meeting.meeting_transcript
       assert meeting.meeting_transcript.language == "en-us"
 
-      assert meeting.meeting_transcript.content["data"] ==
-               transcript_data |> Jason.encode!() |> Jason.decode!()
+      # Expect string keys in persisted JSON
+      expected_data = transcript_data |> Jason.encode!() |> Jason.decode!()
+      assert meeting.meeting_transcript.content["data"] == expected_data
 
       # Verify participants were created
       assert length(meeting.meeting_participants) == 1
 
       participant = List.first(meeting.meeting_participants)
-
+      # Updated assertion for new fixture data
       assert participant.name == "Felipe Gomes Paradas"
       assert participant.recall_participant_id == "100"
       assert participant.is_host == true
+    end
+
+    test "creates meeting by downloading transcript from async url" do
+      # Setup Tesla Mock for download
+      import Tesla.Mock
+
+      transcript_content = meeting_transcript_example()
+      download_url = "https://example.com/download-transcript"
+
+      mock(fn
+        %{method: :get, url: ^download_url} ->
+          %Tesla.Env{status: 200, body: Jason.encode!(transcript_content)}
+      end)
+
+      calendar_event = calendar_event_fixture(%{summary: "Async Meeting"})
+      recall_bot = recall_bot_fixture(%{calendar_event_id: calendar_event.id, user_id: calendar_event.user_id})
+      bot_api_info = meeting_info_example()
+
+      # Input is the metadata wrapper with download_url
+      transcript_metadata = %{
+        "data" => %{
+          "download_url" => download_url
+        }
+      }
+
+      assert {:ok, meeting} =
+               Meetings.create_meeting_from_recall_data(recall_bot, bot_api_info, transcript_metadata)
+
+      assert meeting.title == "Async Meeting"
+      assert meeting.meeting_transcript
+      # Verify content matches the downloaded content
+      expected_data = transcript_content |> Jason.encode!() |> Jason.decode!()
+      assert meeting.meeting_transcript.content["data"] == expected_data
     end
   end
 

@@ -7,6 +7,8 @@
 # General application configuration
 import Config
 
+config :tesla, adapter: Tesla.Adapter.Hackney
+
 config :social_scribe, Oban,
   engine: Oban.Engines.Basic,
   notifier: Oban.Notifiers.Postgres,
@@ -90,7 +92,11 @@ config :ueberauth, Ueberauth,
       {Ueberauth.Strategy.Facebook,
        [
          default_scope: "email,public_profile,pages_show_list,pages_manage_posts"
-       ]}
+       ]},
+    hubspot:
+      {Ueberauth.Strategy.Hubspot, [
+        default_scope: "crm.objects.contacts.read crm.objects.contacts.write"
+      ]}
   ]
 
 # Import environment specific config. This must remain at the bottom

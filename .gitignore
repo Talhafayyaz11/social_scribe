@@ -37,3 +37,8 @@ social_scribe-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# HubSpot config file
+hubspot.config.yml
+
+.env
+.DS_Store

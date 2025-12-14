@@ -123,24 +123,36 @@ defmodule SocialScribe.Bots do
     join_minute_offset =
       Map.get(user_bot_preference, :join_minute_offset, 2)
 
-    with {:ok, %{body: api_response}} <-
-           RecallApi.create_bot(
-             calendar_event.hangout_link,
-             DateTime.add(
-               calendar_event.start_time,
-               -join_minute_offset,
-               :minute
-             )
-           ) do
-      create_recall_bot(%{
-        user_id: user.id,
-        calendar_event_id: calendar_event.id,
-        recall_bot_id: api_response.id,
-        meeting_url: calendar_event.hangout_link,
-        status: api_response.status_changes |> List.first() |> Map.get(:code)
-      })
-    else
-      {:error, reason} -> {:error, {:api_error, reason}}
+    result = RecallApi.create_bot(
+      calendar_event.hangout_link,
+      DateTime.add(
+        calendar_event.start_time,
+        -join_minute_offset,
+        :minute
+      )
+    )
+
+    case result do
+      {:ok, %{status: status, body: api_response}} when status in 200..299 ->
+        # Successful response - create the bot record
+        if Map.has_key?(api_response, :id) do
+          create_recall_bot(%{
+            user_id: user.id,
+            calendar_event_id: calendar_event.id,
+            recall_bot_id: api_response.id,
+            meeting_url: calendar_event.hangout_link,
+            status: get_in(api_response, [:status_changes, Access.at(0), :code]) || "ready"
+          })
+        else
+          {:error, {:api_error, :invalid_response}}
+        end
+
+      {:ok, %{status: status, body: error_body}} ->
+        # API returned an error status code
+        {:error, {:api_error, {status, error_body}}}
+
+      {:error, reason} ->
+        {:error, {:api_error, reason}}
     end
   end
 

@@ -6,6 +6,9 @@ defmodule SocialScribeWeb.MeetingLive.Show do
 
   alias SocialScribe.Meetings
   alias SocialScribe.Automations
+  alias SocialScribe.HubSpot
+  alias SocialScribe.Accounts
+  alias SocialScribe.AIContentGenerator
 
   @impl true
   def mount(%{"id" => meeting_id}, _session, socket) do
@@ -87,11 +90,13 @@ defmodule SocialScribeWeb.MeetingLive.Show do
   attr :meeting_transcript, :map, required: true
 
   defp transcript_content(assigns) do
+    data = Map.get(assigns.meeting_transcript.content, "data")
+
     has_transcript =
-      assigns.meeting_transcript &&
-        assigns.meeting_transcript.content &&
-        Map.get(assigns.meeting_transcript.content, "data") &&
-        Enum.any?(Map.get(assigns.meeting_transcript.content, "data"))
+      data &&
+        is_list(data) &&
+        Enum.any?(data) &&
+        is_map(List.first(data))
 
     assigns =
       assigns
@@ -107,7 +112,7 @@ defmodule SocialScribeWeb.MeetingLive.Show do
           <div :for={segment <- @meeting_transcript.content["data"]} class="mb-3">
             <p>
               <span class="font-semibold text-indigo-600">
-                {segment["speaker"] || "Unknown Speaker"}:
+                {segment["speaker"] || get_in(segment, ["participant", "name"]) || "Unknown Speaker"}:
               </span>
               {Enum.map_join(segment["words"] || [], " ", & &1["text"])}
             </p>
@@ -120,5 +125,100 @@ defmodule SocialScribeWeb.MeetingLive.Show do
       </div>
     </div>
     """
+  end
+
+  @impl true
+  def handle_info({:analyze_hubspot_contact, contact_id}, socket) do
+    # Start async task
+    current_user = socket.assigns.current_user
+    meeting = socket.assigns.meeting
+
+    task =
+      Task.async(fn ->
+        case Accounts.get_user_hubspot_token(current_user) do
+          {:ok, token} ->
+            case HubSpot.get_contact(contact_id, token) do
+              {:ok, contact} ->
+                case AIContentGenerator.suggest_hubspot_updates(meeting, contact, token) do
+                  {:ok, result} -> {:analysis_success, contact_id, result}
+                  {:error, reason} -> {:analysis_error, reason}
+                end
+
+              {:error, reason} ->
+                {:analysis_error, reason}
+            end
+
+          {:error, reason} ->
+            {:analysis_error, reason}
+        end
+      end)
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:sync_hubspot_updates, contact_id, updates}, socket) do
+    current_user = socket.assigns.current_user
+
+    task =
+      Task.async(fn ->
+        case Accounts.get_user_hubspot_token(current_user) do
+          {:ok, token} ->
+            case HubSpot.update_contact(contact_id, updates, token) do
+              {:ok, _} -> {:sync_success}
+              {:error, reason} -> {:sync_error, reason}
+            end
+
+          {:error, reason} ->
+            {:sync_error, reason}
+        end
+      end)
+
+    {:noreply, socket}
+  end
+
+  # Handle Task Results
+  @impl true
+  def handle_info({ref, result}, socket) do
+    # We should match the ref, but for simplicity assuming no concurrent conflicting tasks for now or just handling result types.
+    Process.demonitor(ref, [:flush])
+
+    case result do
+      {:analysis_success, _contact_id, result} ->
+        send_update(SocialScribeWeb.MeetingLive.HubSpotUpdateComponent,
+          id: "hubspot-update-#{socket.assigns.meeting.id}",
+          analyzing: false,
+          suggestions: result.suggestions,
+          property_metadata: result.metadata
+        )
+
+        {:noreply, socket}
+
+      {:analysis_error, _reason} ->
+        send_update(SocialScribeWeb.MeetingLive.HubSpotUpdateComponent,
+          id: "hubspot-update-#{socket.assigns.meeting.id}",
+          analyzing: false,
+          # Empty list to show no results or handle error UI
+          suggestions: []
+        )
+
+        {:noreply, put_flash(socket, :error, "Failed to analyze transcript.")}
+
+      {:sync_success} ->
+        send_update(SocialScribeWeb.MeetingLive.HubSpotUpdateComponent,
+          id: "hubspot-update-#{socket.assigns.meeting.id}",
+          # Reset selection
+          selected_contact: nil,
+          show_dropdown: true,
+          suggestions: nil
+        )
+
+        {:noreply, put_flash(socket, :info, "HubSpot contact updated successfully.")}
+
+      {:sync_error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to sync updates to HubSpot.")}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 end

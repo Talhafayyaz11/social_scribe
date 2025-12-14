@@ -232,6 +232,31 @@ defmodule SocialScribe.Accounts do
     UserCredential.changeset(user_credential, attrs)
   end
 
+  alias SocialScribe.TokenRefresherApi
+
+  def get_user_hubspot_token(user) do
+    case get_user_credential(user, "hubspot") do
+      %UserCredential{} = credential ->
+        # Check if token is expired or expiring soon (within 5 minutes)
+        if credential.expires_at && DateTime.diff(credential.expires_at, DateTime.utc_now()) < 300 do
+          case TokenRefresherApi.refresh_token(credential.refresh_token, :hubspot) do
+            {:ok, new_token_data} ->
+              # Update credential with new token(s)
+              {:ok, updated_credential} = update_credential_tokens(credential, new_token_data)
+              {:ok, updated_credential.token}
+
+            {:error, reason} ->
+              {:error, {:refresh_failed, reason}}
+          end
+        else
+          {:ok, credential.token}
+        end
+
+      nil ->
+        {:error, :not_connected}
+    end
+  end
+
   ## OAuth
 
   def find_or_create_user_from_oauth(%Auth{} = auth) do
@@ -333,11 +358,14 @@ defmodule SocialScribe.Accounts do
   end
 
   defp format_credential_attrs(user, %Auth{credentials: %{refresh_token: nil}} = auth) do
+    # Even if refresh_token is nil, we should save it as nil
+    # This allows the field to be updated later if we get a refresh token
     %{
       user_id: user.id,
       provider: to_string(auth.provider),
       uid: auth.uid,
       token: auth.credentials.token,
+      refresh_token: nil,
       expires_at:
         (auth.credentials.expires_at && DateTime.from_unix!(auth.credentials.expires_at)) ||
           DateTime.add(DateTime.utc_now(), 3600, :second),
@@ -369,13 +397,22 @@ defmodule SocialScribe.Accounts do
   """
   def update_credential_tokens(%UserCredential{} = credential, %{
         "access_token" => token,
-        "expires_in" => expires_in
-      }) do
-    credential
-    |> UserCredential.changeset(%{
+      "expires_in" => expires_in
+      } = attrs) do
+    updates = %{
       token: token,
       expires_at: DateTime.add(DateTime.utc_now(), expires_in, :second)
-    })
+    }
+
+    updates =
+      if refresh_token = attrs["refresh_token"] do
+        Map.put(updates, :refresh_token, refresh_token)
+      else
+        updates
+      end
+
+    credential
+    |> UserCredential.changeset(updates)
     |> Repo.update()
   end
 

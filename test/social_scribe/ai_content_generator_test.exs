@@ -1,0 +1,633 @@
+defmodule SocialScribe.AIContentGeneratorTest do
+  use SocialScribe.DataCase, async: true
+
+  alias SocialScribe.AIContentGenerator
+  alias SocialScribe.Meetings.Meeting
+  alias SocialScribe.Meetings.MeetingParticipant
+  alias SocialScribe.Repo
+
+  import SocialScribe.AccountsFixtures
+  import SocialScribe.BotsFixtures
+
+  describe "suggest_hubspot_updates/3" do
+    setup do
+      user = user_fixture()
+      bot = recall_bot_fixture(%{user_id: user.id})
+
+      # Create a meeting with transcript
+      {:ok, meeting} =
+        %Meeting{}
+        |> Meeting.changeset(%{
+          user_id: user.id,
+          bot_id: bot.id,
+          recall_bot_id: bot.recall_bot_id,
+          calendar_event_id: bot.calendar_event_id,
+          title: "Test Meeting",
+          recall_meeting_id: "test_recall_id",
+          status: :processed,
+          scheduled_at: DateTime.utc_now(),
+          recorded_at: DateTime.utc_now()
+        })
+        |> Repo.insert()
+
+      # Add participants
+      {:ok, _participant1} =
+        %MeetingParticipant{}
+        |> MeetingParticipant.changeset(%{
+          meeting_id: meeting.id,
+          name: "John Smith",
+          is_host: true
+        })
+        |> Repo.insert()
+
+      {:ok, _participant2} =
+        %MeetingParticipant{}
+        |> MeetingParticipant.changeset(%{
+          meeting_id: meeting.id,
+          name: "Jane Doe",
+          is_host: false
+        })
+        |> Repo.insert()
+
+      # Add transcript with proper content structure
+      {:ok, _transcript} =
+        Repo.insert(%SocialScribe.Meetings.MeetingTranscript{
+          meeting_id: meeting.id,
+          content: %{
+            "words" => [
+              %{
+                "word" => "Jane",
+                "speaker" => "John Smith",
+                "start_timestamp" => 120
+              },
+              %{
+                "word" => "mentioned",
+                "speaker" => "John Smith",
+                "start_timestamp" => 120.5
+              },
+              %{
+                "word" => "her",
+                "speaker" => "John Smith",
+                "start_timestamp" => 121
+              },
+              %{
+                "word" => "new",
+                "speaker" => "John Smith",
+                "start_timestamp" => 121.5
+              },
+              %{
+                "word" => "phone",
+                "speaker" => "John Smith",
+                "start_timestamp" => 122
+              },
+              %{
+                "word" => "number",
+                "speaker" => "John Smith",
+                "start_timestamp" => 122.5
+              },
+              %{
+                "word" => "is",
+                "speaker" => "John Smith",
+                "start_timestamp" => 123
+              },
+              %{
+                "word" => "555-1234",
+                "speaker" => "John Smith",
+                "start_timestamp" => 123.5
+              },
+              %{
+                "word" => "and",
+                "speaker" => "John Smith",
+                "start_timestamp" => 124
+              },
+              %{
+                "word" => "she",
+                "speaker" => "John Smith",
+                "start_timestamp" => 124.5
+              },
+              %{
+                "word" => "works",
+                "speaker" => "John Smith",
+                "start_timestamp" => 125
+              },
+              %{
+                "word" => "as",
+                "speaker" => "John Smith",
+                "start_timestamp" => 125.5
+              },
+              %{
+                "word" => "Senior",
+                "speaker" => "John Smith",
+                "start_timestamp" => 126
+              },
+              %{
+                "word" => "Engineer",
+                "speaker" => "John Smith",
+                "start_timestamp" => 126.5
+              },
+              %{
+                "word" => "now",
+                "speaker" => "John Smith",
+                "start_timestamp" => 127
+              }
+            ]
+          }
+        })
+
+      {:ok, _transcript2} =
+        Repo.insert(%SocialScribe.Meetings.MeetingTranscript{
+          meeting_id: meeting.id,
+          content: %{
+            "words" => [
+              %{
+                "word" => "Yes",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 180
+              },
+              %{
+                "word" => "my",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 180.5
+              },
+              %{
+                "word" => "preferred",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 181
+              },
+              %{
+                "word" => "language",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 181.5
+              },
+              %{
+                "word" => "is",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 182
+              },
+              %{
+                "word" => "English",
+                "speaker" => "Jane Doe",
+                "start_timestamp" => 182.5
+              }
+            ]
+          }
+        })
+
+      contact = %{
+        "id" => "contact_123",
+        "properties" => %{
+          "firstname" => "Jane",
+          "lastname" => "Doe",
+          "email" => "jane@example.com",
+          "phone" => "",
+          "jobtitle" => "Engineer",
+          "hs_language" => "es"
+        }
+      }
+
+      token = "test_hubspot_token"
+
+      %{meeting: meeting, contact: contact, token: token}
+    end
+
+    test "generates valid suggestions with metadata", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      # Mock HubSpot property metadata
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "phone",
+                  "type" => "string",
+                  "fieldType" => "text",
+                  "options" => []
+                },
+                %{
+                  "name" => "jobtitle",
+                  "type" => "string",
+                  "fieldType" => "text",
+                  "options" => []
+                },
+                %{
+                  "name" => "hs_language",
+                  "type" => "enumeration",
+                  "fieldType" => "select",
+                  "options" => [
+                    %{"label" => "English", "value" => "en"},
+                    %{"label" => "Spanish", "value" => "es"}
+                  ]
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # Mock Gemini AI response with valid suggestions
+          response =
+            Jason.encode!([
+              %{
+                "property" => "phone",
+                "old_value" => "",
+                "new_value" => "555-1234",
+                "reason" => "John Smith mentioned Jane's new phone number",
+                "timestamp" => "02:00"
+              },
+              %{
+                "property" => "jobtitle",
+                "old_value" => "Engineer",
+                "new_value" => "Senior Engineer",
+                "reason" => "John Smith stated Jane works as Senior Engineer",
+                "timestamp" => "02:00"
+              },
+              %{
+                "property" => "hs_language",
+                "old_value" => "es",
+                "new_value" => "en",
+                "reason" => "Jane Doe stated her preferred language is English",
+                "timestamp" => "03:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{
+                  "content" => %{
+                    "parts" => [%{"text" => response}]
+                  }
+                }
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} = AIContentGenerator.suggest_hubspot_updates(meeting, contact, token)
+      assert Map.has_key?(result, :suggestions)
+      assert Map.has_key?(result, :metadata)
+      assert is_list(result.suggestions)
+      assert is_list(result.metadata)
+    end
+
+    test "filters out invalid enumeration values", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "hs_language",
+                  "type" => "enumeration",
+                  "fieldType" => "select",
+                  "options" => [
+                    %{"label" => "English", "value" => "en"},
+                    %{"label" => "Spanish", "value" => "es"}
+                  ]
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # AI suggests invalid enum value
+          response =
+            Jason.encode!([
+              %{
+                "property" => "hs_language",
+                "old_value" => "es",
+                "new_value" => "french",
+                "reason" => "Contact mentioned French",
+                "timestamp" => "01:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} = AIContentGenerator.suggest_hubspot_updates(meeting, contact, token)
+      # Invalid enum value should be filtered out
+      assert Enum.empty?(result.suggestions)
+    end
+
+    test "filters out invalid number types", %{meeting: meeting, contact: contact, token: token} do
+      contact_with_number =
+        Map.put(contact, "properties", Map.put(contact["properties"], "account_value", 1000))
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "account_value",
+                  "type" => "number",
+                  "fieldType" => "number",
+                  "options" => []
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # AI suggests non-numeric value for number field
+          response =
+            Jason.encode!([
+              %{
+                "property" => "account_value",
+                "old_value" => 1000,
+                "new_value" => "not_a_number",
+                "reason" => "New account value mentioned",
+                "timestamp" => "01:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} =
+               AIContentGenerator.suggest_hubspot_updates(meeting, contact_with_number, token)
+
+      # Invalid number value should be filtered out
+      assert Enum.empty?(result.suggestions)
+    end
+
+    test "accepts valid enumeration internal values", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "hs_language",
+                  "type" => "enumeration",
+                  "fieldType" => "select",
+                  "options" => [
+                    %{"label" => "English", "value" => "en"},
+                    %{"label" => "Spanish", "value" => "es"}
+                  ]
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # AI correctly returns internal value "en"
+          response =
+            Jason.encode!([
+              %{
+                "property" => "hs_language",
+                "old_value" => "es",
+                "new_value" => "en",
+                "reason" => "Jane Doe stated English is preferred",
+                "timestamp" => "03:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} = AIContentGenerator.suggest_hubspot_updates(meeting, contact, token)
+      assert length(result.suggestions) == 1
+      suggestion = Enum.at(result.suggestions, 0)
+      assert suggestion["new_value"] == "en"
+    end
+
+    test "accepts valid number values", %{meeting: meeting, contact: contact, token: token} do
+      contact_with_number =
+        Map.put(contact, "properties", Map.put(contact["properties"], "account_value", 1000))
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "account_value",
+                  "type" => "number",
+                  "fieldType" => "number",
+                  "options" => []
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          response =
+            Jason.encode!([
+              %{
+                "property" => "account_value",
+                "old_value" => 1000,
+                "new_value" => 5000,
+                "reason" => "Account value updated",
+                "timestamp" => "01:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} =
+               AIContentGenerator.suggest_hubspot_updates(meeting, contact_with_number, token)
+
+      assert length(result.suggestions) == 1
+      suggestion = Enum.at(result.suggestions, 0)
+      assert suggestion["new_value"] == 5000
+    end
+
+    test "filters out no-op suggestions where old equals new", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "results" => [
+                %{
+                  "name" => "jobtitle",
+                  "type" => "string",
+                  "fieldType" => "text",
+                  "options" => []
+                }
+              ]
+            }
+          }
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # AI suggests same value as current
+          response =
+            Jason.encode!([
+              %{
+                "property" => "jobtitle",
+                "old_value" => "Engineer",
+                "new_value" => "Engineer",
+                "reason" => "Job title confirmed",
+                "timestamp" => "01:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} = AIContentGenerator.suggest_hubspot_updates(meeting, contact, token)
+      # No-op suggestion should be filtered out
+      assert Enum.empty?(result.suggestions)
+    end
+
+    test "handles missing transcript error", %{contact: contact, token: token} do
+      # Create meeting without transcript
+      user = user_fixture()
+      bot = recall_bot_fixture(%{user_id: user.id})
+
+      {:ok, meeting_no_transcript} =
+        %Meeting{}
+        |> Meeting.changeset(%{
+          user_id: user.id,
+          bot_id: bot.id,
+          recall_bot_id: bot.recall_bot_id,
+          calendar_event_id: bot.calendar_event_id,
+          title: "Meeting Without Transcript",
+          recall_meeting_id: "no_transcript",
+          status: :in_progress,
+          scheduled_at: DateTime.utc_now(),
+          recorded_at: DateTime.utc_now()
+        })
+        |> Repo.insert()
+
+      assert {:error, _reason} =
+               AIContentGenerator.suggest_hubspot_updates(meeting_no_transcript, contact, token)
+    end
+
+    test "handles missing property metadata gracefully", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          # Return error for metadata fetch
+          %Tesla.Env{status: 500, body: %{"message" => "Server error"}}
+
+        %{method: :post, url: url} when is_binary(url) ->
+          response =
+            Jason.encode!([
+              %{
+                "property" => "phone",
+                "old_value" => "",
+                "new_value" => "555-1234",
+                "reason" => "Phone mentioned",
+                "timestamp" => "01:00"
+              }
+            ])
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      # Should still return suggestions even without metadata
+      assert {:ok, result} = AIContentGenerator.suggest_hubspot_updates(meeting, contact, token)
+      assert length(result.suggestions) == 1
+      assert result.metadata == []
+    end
+
+    test "returns empty array when contact not mentioned", %{
+      meeting: meeting,
+      contact: contact,
+      token: token
+    } do
+      # Use a contact that's not in the transcript
+      different_contact = %{
+        "id" => "other_contact",
+        "properties" => %{
+          "firstname" => "Bob",
+          "lastname" => "Johnson",
+          "email" => "bob@example.com"
+        }
+      }
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: "https://api.hubapi.com/crm/v3/properties/contacts"} ->
+          %Tesla.Env{status: 200, body: %{"results" => []}}
+
+        %{method: :post, url: url} when is_binary(url) ->
+          # AI correctly returns empty array
+          response = "[]"
+
+          %Tesla.Env{
+            status: 200,
+            body: %{
+              "candidates" => [
+                %{"content" => %{"parts" => [%{"text" => response}]}}
+              ]
+            }
+          }
+      end)
+
+      assert {:ok, result} =
+               AIContentGenerator.suggest_hubspot_updates(meeting, different_contact, token)
+
+      assert Enum.empty?(result.suggestions)
+    end
+  end
+end

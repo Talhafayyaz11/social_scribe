@@ -346,22 +346,111 @@ defmodule SocialScribe.Meetings do
   def create_meeting_from_recall_data(%RecallBot{} = recall_bot, bot_api_info, transcript_data) do
     calendar_event = Repo.preload(recall_bot, :calendar_event).calendar_event
 
+    # Fetch actual content if transcript_data contains a download URL
+    transcript_data = maybe_fetch_transcript_content(transcript_data)
+
     Repo.transaction(fn ->
-      meeting_attrs = parse_meeting_attrs(calendar_event, recall_bot, bot_api_info)
+      try do
+        Logger.info("Starting meeting creation transaction")
+        meeting_attrs = parse_meeting_attrs(calendar_event, recall_bot, bot_api_info)
+        Logger.info("Meeting attrs: #{inspect(meeting_attrs)}")
 
-      {:ok, meeting} = create_meeting(meeting_attrs)
+        meeting =
+          case create_meeting(meeting_attrs) do
+            {:ok, m} ->
+              Logger.info("Meeting created: #{m.id}")
+              m
 
-      transcript_attrs = parse_transcript_attrs(meeting, transcript_data)
+            {:error, cs} ->
+              Logger.error("Meeting creation failed: #{inspect(cs)}")
+              Repo.rollback(cs)
+          end
 
-      {:ok, _transcript} = create_meeting_transcript(transcript_attrs)
+        transcript_attrs = parse_transcript_attrs(meeting, transcript_data)
 
-      Enum.each(bot_api_info.meeting_participants || [], fn participant_data ->
-        participant_attrs = parse_participant_attrs(meeting, participant_data)
-        create_meeting_participant(participant_attrs)
-      end)
+        case create_meeting_transcript(transcript_attrs) do
+          {:ok, _} ->
+            Logger.info("Transcript created")
 
-      Repo.preload(meeting, [:meeting_transcript, :meeting_participants])
+          {:error, reason} ->
+            Logger.error("Failed to create transcript: #{inspect(reason)}")
+            # Don't rollback, just continue
+        end
+
+        Enum.each(Map.get(bot_api_info, :meeting_participants) || [], fn participant_data ->
+          try do
+            participant_attrs = parse_participant_attrs(meeting, participant_data)
+
+            case create_meeting_participant(participant_attrs) do
+              {:ok, _} ->
+                :ok
+
+              {:error, reason} ->
+                Logger.error("Failed to create participant: #{inspect(reason)}")
+            end
+          rescue
+            e -> Logger.error("Participant parsing failed: #{inspect(e)}")
+          end
+        end)
+
+        Logger.info("Participants processed")
+
+        Repo.preload(meeting, [:meeting_transcript, :meeting_participants])
+      rescue
+        e ->
+          Logger.error("CRITICAL ERROR in meeting creation: #{inspect(e)}")
+          Logger.error(Exception.format(:error, e, __STACKTRACE__))
+          Repo.rollback(e)
+      end
     end)
+  end
+
+  defp maybe_fetch_transcript_content(transcript_data) do
+    # Guard against list input (legacy format)
+    download_url =
+      if is_map(transcript_data) do
+        get_in(transcript_data, [:data, :download_url]) ||
+          get_in(transcript_data, ["data", "download_url"])
+      else
+        nil
+      end
+
+    if download_url do
+      Logger.info("Fetching transcript content from download URL: #{download_url}")
+      # Use basic Tesla or httpc. Since Tesla is configured for Recall (with base URL),
+      # we should use a fresh client for this absolute URL.
+      # Or just use the URL directly if Tesla supports absolute URLs overriding base. It usually does not with BaseUrl middleware.
+      # Safest is to use :httpc or a bare Tesla client.
+      case Tesla.get(download_url) do
+        {:ok, %{status: 200, body: body}} ->
+          Logger.info("Successfully downloaded transcript content.")
+
+          decoded =
+            case body do
+              body when is_binary(body) ->
+                case Jason.decode(body) do
+                  {:ok, d} -> d
+                  _ -> body
+                end
+
+              body ->
+                body
+            end
+
+          decoded
+
+        {:ok, response} ->
+          # Maybe Tesla.Middleware.JSON was applied globally?
+          # If body is map, return it.
+          if is_map(response.body), do: response.body, else: response.body
+
+        error ->
+          Logger.error("Failed to download transcript content: #{inspect(error)}")
+          transcript_data
+      end
+    else
+      transcript_data
+    end
   end
 
   # --- Private Parser Functions ---
@@ -378,7 +467,7 @@ defmodule SocialScribe.Meetings do
     recorded_at =
       case DateTime.from_iso8601(recording_info.started_at) do
         {:ok, parsed_recorded_at, _} -> parsed_recorded_at
-        _ -> nil
+        _ -> calendar_event.start_time
       end
 
     duration_seconds =
@@ -402,10 +491,19 @@ defmodule SocialScribe.Meetings do
   end
 
   defp parse_transcript_attrs(meeting, transcript_data) do
+    first_segment = if is_list(transcript_data), do: List.first(transcript_data), else: nil
+
+    language =
+      if is_map(first_segment) do
+        Map.get(first_segment, :language) || Map.get(first_segment, "language") || "unknown"
+      else
+        "unknown"
+      end
+
     %{
       meeting_id: meeting.id,
       content: %{data: transcript_data},
-      language: List.first(transcript_data || []) |> Map.get(:language, "unknown")
+      language: language
     }
   end
 
@@ -474,20 +572,111 @@ defmodule SocialScribe.Meetings do
     end
   end
 
-  defp transcript_to_string(%MeetingTranscript{content: %{"data" => transcript_data}})
-       when not is_nil(transcript_data) do
-    {:ok, format_transcript_for_prompt(transcript_data)}
+  def get_transcript_with_timestamps(%Meeting{} = meeting) do
+    case transcript_to_string(meeting.meeting_transcript, true) do
+      {:ok, transcript_string} -> {:ok, transcript_string}
+      _ -> {:error, :no_transcript}
+    end
   end
 
-  defp transcript_to_string(_), do: {:error, :no_transcript}
+  defp transcript_to_string(
+         %MeetingTranscript{content: %{"data" => transcript_data}},
+         with_timestamps \\ false
+       )
+       when not is_nil(transcript_data) do
+    {:ok, format_transcript_for_prompt(transcript_data, with_timestamps)}
+  end
 
-  defp format_transcript_for_prompt(transcript_segments) when is_list(transcript_segments) do
+  defp transcript_to_string(_, _), do: {:error, :no_transcript}
+
+  defp format_transcript_for_prompt(transcript_segments, with_timestamps \\ false)
+       when is_list(transcript_segments) do
     Enum.map_join(transcript_segments, "\n", fn segment ->
-      speaker = Map.get(segment, "speaker", "Unknown Speaker")
-      text = Enum.map_join(Map.get(segment, "words", []), " ", &Map.get(&1, "text", ""))
-      "#{speaker}: #{text}"
+      speaker =
+        segment["speaker"] || get_in(segment, ["participant", "name"]) || "Unknown Speaker"
+
+      words = Map.get(segment, "words", [])
+
+      if Enum.empty?(words) do
+        # Fallback if no words (legacy or summarized)
+        text = Map.get(segment, "text", "")
+
+        start_time =
+          extract_seconds(Map.get(segment, "start_timestamp") || Map.get(segment, "start_time"))
+
+        format_line(speaker, text, start_time, with_timestamps)
+      else
+        # Chunk words by sentence to provide detailed timestamps
+        words
+        |> chunk_words_by_sentence()
+        |> Enum.map_join("\n", fn {sentence_words, start_timestamp} ->
+          text = Enum.map_join(sentence_words, " ", &Map.get(&1, "text", ""))
+          format_line(speaker, text, start_timestamp, with_timestamps)
+        end)
+      end
     end)
   end
 
-  defp format_transcript_for_prompt(_), do: ""
+  defp chunk_words_by_sentence(words) do
+    Enum.reduce(words, {[], []}, fn word, {current_sentence, sentences} ->
+      text = Map.get(word, "text", "")
+      is_end_of_sentence = String.match?(text, ~r/[.?!]$/)
+
+      # If this is the start of a new sentence, capture timestamp
+      new_sentence = current_sentence ++ [word]
+
+      if is_end_of_sentence do
+        # Finish current sentence
+        sentence_start_time = get_start_time(List.first(new_sentence))
+        {[], sentences ++ [{new_sentence, sentence_start_time}]}
+      else
+        # Continue sentence
+        {new_sentence, sentences}
+      end
+    end)
+    |> case do
+      {[], sentences} ->
+        sentences
+
+      {remaining, sentences} ->
+        # Flush remaining words
+        sentence_start_time = get_start_time(List.first(remaining))
+        sentences ++ [{remaining, sentence_start_time}]
+    end
+  end
+
+  defp get_start_time(word) do
+    if word do
+      extract_seconds(Map.get(word, "start_timestamp") || Map.get(word, "start_time"))
+    else
+      0
+    end
+  end
+
+  defp format_line(speaker, text, start_time, true) do
+    formatted_time = format_timestamp(start_time)
+    "[#{formatted_time}] #{speaker}: #{text}"
+  end
+
+  defp format_line(speaker, text, _start_time, false) do
+    "#{speaker}: #{text}"
+  end
+
+  defp extract_seconds(timestamp) when is_number(timestamp), do: timestamp
+
+  defp extract_seconds(timestamp) when is_map(timestamp) do
+    Map.get(timestamp, "relative") || Map.get(timestamp, :relative) || 0
+  end
+
+  defp extract_seconds(_), do: 0
+
+  defp format_timestamp(seconds) when is_number(seconds) do
+    minutes = floor(seconds / 60)
+    remaining_seconds = floor(seconds - minutes * 60)
+    formatted_minutes = String.pad_leading("#{minutes}", 2, "0")
+    formatted_seconds = String.pad_leading("#{remaining_seconds}", 2, "0")
+    "#{formatted_minutes}:#{formatted_seconds}"
+  end
+
+  defp format_timestamp(_), do: "00:00"
 end
