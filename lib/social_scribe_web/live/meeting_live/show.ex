@@ -29,12 +29,24 @@ defmodule SocialScribeWeb.MeetingLive.Show do
 
       {:error, socket}
     else
+      # Check if transcript is available
+      has_transcript = check_transcript_availability(meeting)
+
+      # Check if HubSpot is connected
+      hubspot_connected =
+        case Accounts.get_user_hubspot_token(socket.assigns.current_user) do
+          {:ok, _token} -> true
+          {:error, _} -> false
+        end
+
       socket =
         socket
         |> assign(:page_title, "Meeting Details: #{meeting.title}")
         |> assign(:meeting, meeting)
         |> assign(:automation_results, automation_results)
         |> assign(:user_has_automations, user_has_automations)
+        |> assign(:has_transcript, has_transcript)
+        |> assign(:hubspot_connected, hubspot_connected)
         |> assign(
           :follow_up_email_form,
           to_form(%{
@@ -125,6 +137,21 @@ defmodule SocialScribeWeb.MeetingLive.Show do
       </div>
     </div>
     """
+  end
+
+  defp check_transcript_availability(meeting) do
+    case meeting.meeting_transcript do
+      nil ->
+        false
+
+      transcript ->
+        data = get_in(transcript.content, ["data"])
+
+        data &&
+          is_list(data) &&
+          Enum.any?(data) &&
+          is_map(List.first(data))
+    end
   end
 
   @impl true

@@ -213,7 +213,11 @@ defmodule SocialScribeWeb.MeetingLive.HubSpotUpdateComponent do
                     <div class="flex-1">
                       <div class="text-xs text-gray-500 mb-1">Old Value</div>
                       <div class="text-sm bg-white border border-gray-200 rounded px-2 py-1 text-gray-500 line-through">
-                        {suggestion["old_value"] || "Empty"}
+                        {get_display_value(
+                          suggestion["property"],
+                          suggestion["old_value"],
+                          @property_metadata
+                        ) || "Empty"}
                       </div>
                     </div>
                     <.icon name="hero-arrow-long-right" class="h-5 w-5 text-gray-400" />
