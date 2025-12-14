@@ -220,7 +220,10 @@ defmodule SocialScribeWeb.MeetingLive.HubSpotUpdateComponent do
                         ) || "No existing value"}
                       </div>
                     </div>
-                    <.icon name="hero-arrow-long-right" class="h-5 w-5 text-gray-400 self-center" />
+                    <.icon
+                      name="hero-arrow-long-right"
+                      class="h-5 w-5 text-gray-400 self-center mt-6"
+                    />
                     <div class="flex-1">
                       <div class="text-xs text-gray-500 mb-1">New Value</div>
                       <div class="text-sm bg-white border border-indigo-300 ring-1 ring-indigo-300 rounded px-2 py-1 text-gray-900 font-medium">
@@ -426,26 +429,35 @@ defmodule SocialScribeWeb.MeetingLive.HubSpotUpdateComponent do
     "#{f}#{l}" |> String.upcase()
   end
 
-  # Converts internal property value to display label for enumeration properties
-  defp get_display_value(property_name, value, metadata) do
-    # Find metadata for this property
-    case Enum.find(metadata, fn m -> m.name == property_name end) do
-      nil ->
-        # No metadata found, return value as-is
-        to_string(value)
+  defp get_display_value(_property, nil, _metadata), do: nil
+  defp get_display_value(_property, "", _metadata), do: nil
 
-      meta ->
-        # Check if this property has enumeration options
-        if meta.options != [] do
-          # Find the option that matches this value
-          case Enum.find(meta.options, fn opt -> opt.value == value end) do
-            nil -> to_string(value)
+  defp get_display_value(property, value, metadata) do
+    # Trim whitespace and treat empty strings as nil
+    trimmed_value = if is_binary(value), do: String.trim(value), else: value
+
+    if is_binary(trimmed_value) && trimmed_value == "" do
+      nil
+    else
+      # Find the property metadata
+      meta = Enum.find(metadata, fn m -> m.name == property end)
+
+      case meta do
+        nil ->
+          # No metadata found, return the original value
+          to_string(trimmed_value || value)
+
+        %{options: options} when options != [] ->
+          # For enum properties, convert internal value to label
+          case Enum.find(options, fn opt -> opt.value == (trimmed_value || value) end) do
+            nil -> to_string(trimmed_value || value)
             opt -> opt.label
           end
-        else
-          # Not an enumeration, return value as-is
-          to_string(value)
-        end
+
+        _ ->
+          # For non-enum properties, return the value as-is
+          to_string(trimmed_value || value)
+      end
     end
   end
 end
