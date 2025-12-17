@@ -65,6 +65,17 @@ Social Scribe is a powerful Elixir and Phoenix LiveView application designed to 
 
 * **Dashboard View:**
     ![Dashboard View](readme_assets/dashboard_view.png)
+    
+* **HubSpot View:**
+   <img width="1245" height="237" alt="image" src="https://github.com/user-attachments/assets/5d8bcc40-52c7-4366-a17b-22c98f620007" />
+
+* **HubSpot Modal:**
+<img width="1247" height="145" alt="image" src="https://github.com/user-attachments/assets/d3364ff8-b2e3-4d8b-ad02-cfbb6ef95fad" />
+<img width="734" height="389" alt="image" src="https://github.com/user-attachments/assets/8a26c9a0-66e3-44f1-ae9b-1ade6eacdfe4" />
+<img width="728" height="682" alt="image" src="https://github.com/user-attachments/assets/b42608af-dc6b-4a12-b6b1-3db227c12b35" />
+
+
+
 
 
 * **Automation Configuration UI:**
@@ -130,6 +141,10 @@ Follow these steps to get SocialScribe running on your local machine.
         * `FACEBOOK_APP_ID`: Your Facebook App ID.
         * `FACEBOOK_APP_SECRET`: Your Facebook App Secret.
         * `FACEBOOK_REDIRECT_URI`: `"http://localhost:4000/auth/facebook/callback"`
+        * `RECALL_REGION`: `"us-west-2"`
+        * `HUBSPOT_CLIENT_ID`: `""`
+        * `HUBSPOT_CLIENT_SECRET`: `""`
+        *  `HUBSPOT_REDIRECT_URI`: `"http://localhost:4000/auth/hubspot/callback"`
 
 4.  **Start the Phoenix Server:**
     ```bash
