@@ -377,12 +377,22 @@ defmodule SocialScribe.Meetings do
             # Don't rollback, just continue
         end
 
-        Enum.each(Map.get(bot_api_info, :meeting_participants) || [], fn participant_data ->
+        # Fetch participants from the download URL if available
+        participants = fetch_participants_from_bot_info(bot_api_info)
+        Logger.info("Found #{length(participants)} participants to process")
+
+        Enum.each(participants, fn participant_data ->
           try do
+            Logger.debug("Raw participant data: #{inspect(participant_data)}")
             participant_attrs = parse_participant_attrs(meeting, participant_data)
+            Logger.debug("Parsed participant attrs: #{inspect(participant_attrs)}")
 
             case create_meeting_participant(participant_attrs) do
-              {:ok, _} ->
+              {:ok, participant} ->
+                Logger.info(
+                  "Created participant: #{participant.name} (ID: #{participant.recall_participant_id})"
+                )
+
                 :ok
 
               {:error, reason} ->
@@ -409,8 +419,7 @@ defmodule SocialScribe.Meetings do
     # Guard against list input (legacy format)
     download_url =
       if is_map(transcript_data) do
-        get_in(transcript_data, [:data, :download_url]) ||
-          get_in(transcript_data, ["data", "download_url"])
+        fetch_value(transcript_data, :data) |> fetch_value(:download_url)
       else
         nil
       end
@@ -456,16 +465,17 @@ defmodule SocialScribe.Meetings do
   # --- Private Parser Functions ---
 
   defp parse_meeting_attrs(calendar_event, recall_bot, bot_api_info) do
-    recording_info = List.first(bot_api_info.recordings || []) || %{}
+    recordings = fetch_value(bot_api_info, :recordings) || []
+    recording_info = List.first(recordings) || %{}
 
     completed_at =
-      case DateTime.from_iso8601(recording_info.completed_at) do
+      case DateTime.from_iso8601(fetch_value(recording_info, :completed_at) || "") do
         {:ok, parsed_completed_at, _} -> parsed_completed_at
         _ -> nil
       end
 
     recorded_at =
-      case DateTime.from_iso8601(recording_info.started_at) do
+      case DateTime.from_iso8601(fetch_value(recording_info, :started_at) || "") do
         {:ok, parsed_recorded_at, _} -> parsed_recorded_at
         _ -> calendar_event.start_time
       end
@@ -477,8 +487,10 @@ defmodule SocialScribe.Meetings do
         nil
       end
 
+    meeting_metadata = fetch_value(bot_api_info, :meeting_metadata) || %{}
+
     title =
-      calendar_event.summary || Map.get(bot_api_info, [:meeting_metadata, :title]) ||
+      calendar_event.summary || fetch_value(meeting_metadata, :title) ||
         "Recorded Meeting"
 
     %{
@@ -495,7 +507,7 @@ defmodule SocialScribe.Meetings do
 
     language =
       if is_map(first_segment) do
-        Map.get(first_segment, :language) || Map.get(first_segment, "language") || "unknown"
+        fetch_value(first_segment, :language) || "unknown"
       else
         "unknown"
       end
@@ -510,35 +522,176 @@ defmodule SocialScribe.Meetings do
   defp parse_participant_attrs(meeting, participant_data) do
     %{
       meeting_id: meeting.id,
-      recall_participant_id: to_string(participant_data.id),
-      name: participant_data.name,
-      is_host: Map.get(participant_data, :is_host, false)
+      recall_participant_id: to_string(fetch_value(participant_data, :id)),
+      name: fetch_value(participant_data, :name) || "Unknown Participant",
+      is_host: fetch_value(participant_data, :is_host) || false
     }
   end
+
+  defp fetch_participants_from_bot_info(bot_api_info) do
+    Logger.info("PARTICIPANTS FETCH: Starting to extract participants from bot_api_info")
+
+    # Try to get participants from the download URL in recordings
+    recordings = fetch_value(bot_api_info, :recordings) || []
+    Logger.info("PARTICIPANTS FETCH: Found #{length(recordings)} recordings")
+
+    first_recording = List.first(recordings)
+
+    if first_recording do
+      Logger.debug("PARTICIPANTS FETCH: First recording exists")
+      media_shortcuts = fetch_value(first_recording, :media_shortcuts)
+
+      if media_shortcuts do
+        Logger.debug("PARTICIPANTS FETCH: media_shortcuts exists")
+        participant_events = fetch_value(media_shortcuts, :participant_events)
+
+        if participant_events do
+          Logger.debug("PARTICIPANTS FETCH: participant_events exists")
+          data = fetch_value(participant_events, :data)
+
+          if data do
+            Logger.debug("PARTICIPANTS FETCH: data field exists")
+            participants_url = fetch_value(data, :participants_download_url)
+
+            Logger.info("PARTICIPANTS FETCH: participants_url = #{inspect(participants_url)}")
+
+            if participants_url do
+              Logger.info("Fetching participants from download URL: #{participants_url}")
+
+              case Tesla.get(participants_url) do
+                {:ok, %{status: 200, body: body}} ->
+                  Logger.info("Successfully downloaded participants data")
+
+                  Logger.debug(
+                    "PARTICIPANTS FETCH: Raw body type: #{if is_binary(body), do: "binary", else: if(is_map(body), do: "map", else: "other")}"
+                  )
+
+                  # Parse the response
+                  participants_data =
+                    case body do
+                      body when is_binary(body) ->
+                        Logger.debug("PARTICIPANTS FETCH: Body is binary, decoding JSON")
+
+                        case Jason.decode(body, keys: :atoms) do
+                          {:ok, decoded} ->
+                            Logger.info("PARTICIPANTS FETCH: Decoded JSON successfully")
+                            decoded
+
+                          error ->
+                            Logger.error(
+                              "PARTICIPANTS FETCH: JSON decode failed: #{inspect(error)}"
+                            )
+
+                            body
+                        end
+
+                      body when is_map(body) ->
+                        Logger.debug("PARTICIPANTS FETCH: Body is already a map")
+                        body
+
+                      _ ->
+                        Logger.warning("PARTICIPANTS FETCH: Body is neither binary nor map")
+                        []
+                    end
+
+                  # Extract participants array
+                  result =
+                    cond do
+                      is_list(participants_data) ->
+                        Logger.info(
+                          "PARTICIPANTS FETCH: Data is already a list with #{length(participants_data)} items"
+                        )
+
+                        participants_data
+
+                      is_map(participants_data) ->
+                        extracted = fetch_value(participants_data, :participants) || []
+
+                        Logger.info(
+                          "PARTICIPANTS FETCH: Extracted #{length(extracted)} participants from map"
+                        )
+
+                        extracted
+
+                      true ->
+                        Logger.warning("PARTICIPANTS FETCH: Data is neither list nor map")
+                        []
+                    end
+
+                  Logger.info("PARTICIPANTS FETCH: Returning #{length(result)} participants")
+                  result
+
+                {:ok, response} ->
+                  Logger.warning(
+                    "Got non-200 response when fetching participants: #{inspect(response.status)}"
+                  )
+
+                  []
+
+                error ->
+                  Logger.error("Failed to download participants: #{inspect(error)}")
+                  []
+              end
+            else
+              Logger.info("No participants download URL available (may still be processing)")
+              []
+            end
+          else
+            Logger.debug("No data field in participant_events")
+            []
+          end
+        else
+          Logger.debug("No participant_events in media_shortcuts")
+          []
+        end
+      else
+        Logger.debug("No media_shortcuts in recording")
+        []
+      end
+    else
+      Logger.debug("No recordings available")
+      []
+    end
+  end
+
+  defp fetch_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp fetch_value(map, key) when is_map(map) and is_binary(key) do
+    Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+  rescue
+    _ -> nil
+  end
+
+  defp fetch_value(_map, _key), do: nil
 
   @doc """
   Generates a prompt for a meeting.
   """
   def generate_prompt_for_meeting(%Meeting{} = meeting) do
-    case participants_to_string(meeting.meeting_participants) do
-      {:error, :no_participants} ->
-        {:error, :no_participants}
+    participants_string =
+      case participants_to_string(meeting.meeting_participants) do
+        {:error, :no_participants} ->
+          "Unknown Participants"
 
-      {:ok, participants_string} ->
-        case transcript_to_string(meeting.meeting_transcript) do
-          {:error, :no_transcript} ->
-            {:error, :no_transcript}
+        {:ok, participants_string} ->
+          participants_string
+      end
 
-          {:ok, transcript_string} ->
-            {:ok,
-             generate_prompt(
-               meeting.title,
-               meeting.recorded_at,
-               meeting.duration_seconds,
-               participants_string,
-               transcript_string
-             )}
-        end
+    case transcript_to_string(meeting.meeting_transcript) do
+      {:error, :no_transcript} ->
+        {:error, :no_transcript}
+
+      {:ok, transcript_string} ->
+        {:ok,
+         generate_prompt(
+           meeting.title,
+           meeting.recorded_at,
+           meeting.duration_seconds,
+           participants_string,
+           transcript_string
+         )}
     end
   end
 

@@ -264,6 +264,24 @@ defmodule SocialScribe.MeetingsTest do
     import SocialScribe.MeetingTranscriptExample
 
     test "creates a complete meeting record with transcript and participants" do
+      # Setup Tesla Mock for participant download
+      import Tesla.Mock
+
+      participants_data = [
+        %{
+          "id" => 100,
+          "name" => "Felipe Gomes Paradas",
+          "is_host" => true
+        }
+      ]
+
+      participants_download_url = "https://example.com/download-participants"
+
+      mock(fn
+        %{method: :get, url: ^participants_download_url} ->
+          %Tesla.Env{status: 200, body: Jason.encode!(participants_data)}
+      end)
+
       # Mock the transcript data as a list (legacy/direct content) which bypasses download
       calendar_event = calendar_event_fixture(%{summary: "Test Meeting"})
 
@@ -273,7 +291,22 @@ defmodule SocialScribe.MeetingsTest do
           user_id: calendar_event.user_id
         })
 
-      bot_api_info = meeting_info_example()
+      # Update bot_api_info to include participants_download_url
+      bot_api_info = %{
+        recordings: [
+          %{
+            started_at: "2025-05-24T00:27:00Z",
+            completed_at: "2025-05-24T00:30:56Z",
+            media_shortcuts: %{
+              participant_events: %{
+                data: %{
+                  participants_download_url: participants_download_url
+                }
+              }
+            }
+          }
+        ]
+      }
 
       transcript_data = meeting_transcript_example()
 
@@ -282,7 +315,8 @@ defmodule SocialScribe.MeetingsTest do
 
       # Verify meeting was created with correct attributes
       assert meeting.title == "Test Meeting"
-      assert meeting.duration_seconds == 176
+      # Duration from 00:27:00 to 00:30:56 is 236 seconds
+      assert meeting.duration_seconds == 236
       assert meeting.calendar_event_id == calendar_event.id
       assert meeting.recall_bot_id == recall_bot.id
 
@@ -317,7 +351,13 @@ defmodule SocialScribe.MeetingsTest do
       end)
 
       calendar_event = calendar_event_fixture(%{summary: "Async Meeting"})
-      recall_bot = recall_bot_fixture(%{calendar_event_id: calendar_event.id, user_id: calendar_event.user_id})
+
+      recall_bot =
+        recall_bot_fixture(%{
+          calendar_event_id: calendar_event.id,
+          user_id: calendar_event.user_id
+        })
+
       bot_api_info = meeting_info_example()
 
       # Input is the metadata wrapper with download_url
@@ -328,13 +368,106 @@ defmodule SocialScribe.MeetingsTest do
       }
 
       assert {:ok, meeting} =
-               Meetings.create_meeting_from_recall_data(recall_bot, bot_api_info, transcript_metadata)
+               Meetings.create_meeting_from_recall_data(
+                 recall_bot,
+                 bot_api_info,
+                 transcript_metadata
+               )
 
       assert meeting.title == "Async Meeting"
       assert meeting.meeting_transcript
       # Verify content matches the downloaded content
       expected_data = transcript_content |> Jason.encode!() |> Jason.decode!()
       assert meeting.meeting_transcript.content["data"] == expected_data
+    end
+
+    test "creates meeting even if participant name is missing (defaults to Unknown)" do
+      # Setup Tesla Mock for participant download with missing name
+      import Tesla.Mock
+
+      participants_data = [
+        # No name field
+        %{"id" => "123", "is_host" => true}
+      ]
+
+      participants_download_url = "https://example.com/download-participants-no-name"
+
+      mock(fn
+        %{method: :get, url: ^participants_download_url} ->
+          %Tesla.Env{status: 200, body: Jason.encode!(participants_data)}
+      end)
+
+      # Mock transcript data
+      calendar_event = calendar_event_fixture(%{summary: "No Name Participant"})
+
+      recall_bot =
+        recall_bot_fixture(%{
+          calendar_event_id: calendar_event.id,
+          user_id: calendar_event.user_id
+        })
+
+      # Info with participant URL
+      bot_api_info = %{
+        recordings: [
+          %{
+            started_at: "2025-05-24T00:27:00Z",
+            completed_at: "2025-05-24T00:30:56Z",
+            media_shortcuts: %{
+              participant_events: %{
+                data: %{
+                  participants_download_url: participants_download_url
+                }
+              }
+            }
+          }
+        ]
+      }
+
+      transcript_data = meeting_transcript_example()
+
+      assert {:ok, meeting} =
+               Meetings.create_meeting_from_recall_data(recall_bot, bot_api_info, transcript_data)
+
+      # Verify participant was created with default name
+      assert length(meeting.meeting_participants) == 1
+      participant = List.first(meeting.meeting_participants)
+      assert participant.name == "Unknown Participant"
+    end
+
+    test "creates meeting without participants when download URL is not available yet" do
+      calendar_event = calendar_event_fixture(%{summary: "Processing Participants"})
+
+      recall_bot =
+        recall_bot_fixture(%{
+          calendar_event_id: calendar_event.id,
+          user_id: calendar_event.user_id
+        })
+
+      # Info with no participants_download_url (still processing)
+      bot_api_info = %{
+        recordings: [
+          %{
+            started_at: "2025-05-24T00:27:00Z",
+            completed_at: "2025-05-24T00:30:56Z",
+            media_shortcuts: %{
+              participant_events: %{
+                data:
+                  %{
+                    # No participants_download_url yet
+                  }
+              }
+            }
+          }
+        ]
+      }
+
+      transcript_data = meeting_transcript_example()
+
+      assert {:ok, meeting} =
+               Meetings.create_meeting_from_recall_data(recall_bot, bot_api_info, transcript_data)
+
+      # Verify meeting was created but without participants
+      assert length(meeting.meeting_participants) == 0
     end
   end
 
@@ -363,6 +496,26 @@ defmodule SocialScribe.MeetingsTest do
              ### Participants:
              #{meeting_participant.name} (Host)
              #{meeting_participant_2.name} (Participant)
+
+             ### Transcript:
+             """
+    end
+
+    test "generates a prompt for a meeting with no participants" do
+      meeting = meeting_fixture()
+
+      _meeting_transcript =
+        meeting_transcript_fixture(%{meeting_id: meeting.id, content: @mock_transcript_data})
+
+      # No participants created
+
+      meeting = Meetings.get_meeting_with_details(meeting.id)
+
+      {:ok, prompt} = Meetings.generate_prompt_for_meeting(meeting)
+
+      assert prompt =~ """
+             ### Participants:
+             Unknown Participants
 
              ### Transcript:
              """
